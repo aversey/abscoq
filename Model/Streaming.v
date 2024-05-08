@@ -1,20 +1,15 @@
 From Coq Require Import List Vector String.
 Import ListNotations.
 
-Module Type CountOfProcessors.
-  Parameter countOfProcessors: nat.
-End CountOfProcessors.
+Section Streaming.
 
-Module Type Parameters.
-  Parameter Processor: Type.
-  Parameter State: Type.
-  Parameter MessageData: Type.
-  Parameter AuxiliaryData: Type.
-End Parameters.
-
-Module Streaming (C: CountOfProcessors) (P: Parameters).
-Export C.
-Export P.
+Class SParameters: Type :=
+  { SCountOfProcessors: nat
+  ; SProcessor: Type
+  ; SState: Type
+  ; SMessageData: Type
+  ; SAuxiliaryData: Type }.
+Context { sParametersContext: SParameters }.
 
 (* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *)
 (* Syntax *)
@@ -22,7 +17,7 @@ Export P.
 (* Basic Definitions *)
 
 (* Processor ID *)
-Implicit Types (p q: Fin.t countOfProcessors).
+Implicit Types (p q: Fin.t SCountOfProcessors).
 
 (* Stream Name *)
 Implicit Types (s o r t: string).
@@ -34,57 +29,68 @@ Implicit Types (n: nat).
 Implicit Types (i j: nat).
 
 (* Processor *)
-Implicit Types (pi: Processor).
+Implicit Types (pi: SProcessor).
 
 (* State *)
-Implicit Types (sigma Sigmap: State).
+Implicit Types (sigma Sigmap: SState).
 
 (* Message Data *)
-Implicit Types (d: MessageData).
+Implicit Types (d: SMessageData).
 
 (* Auxiliary Data *)
-Implicit Types (D: AuxiliaryData).
+Implicit Types (D: SAuxiliaryData).
 
 (* Compound Definitions *)
 
-Definition Processors := Vector.t Processor countOfProcessors.
+Definition Processors := Vector.t SProcessor SCountOfProcessors.
 Implicit Types (Pi: Processors).
 
-Definition States := Vector.t State countOfProcessors.
+Definition States := Vector.t SState SCountOfProcessors.
 Implicit Types (Sigma: States).
 
-Inductive Message := message n s d.
+Definition Message: Type := nat * string * SMessageData.
 Implicit Types (m: Message).
 Definition Messages := list Message.
 Implicit Types (M: Messages).
 
-Definition SequenceNumbers := string -> nat.
+Definition SequenceNumbers: Type := list (string * nat).
 Implicit Types (Np: SequenceNumbers).
-Definition AllSequenceNumbers := Vector.t SequenceNumbers countOfProcessors.
+Definition AllSequenceNumbers := Vector.t SequenceNumbers SCountOfProcessors.
 Implicit Types (N: AllSequenceNumbers).
 
 Inductive Action := produce s d | consume s d.
-Notation "`+" := produce (at level 1) : type_scope.
-Notation "`-" := consume (at level 1) : type_scope.
+Notation "`+" := produce (at level 1).
+Notation "`-" := consume (at level 1).
 Implicit Types (x: Action).
 Definition Actions := list Action.
 Implicit Types (X: Actions).
 
 (* The Configuration *)
 
-Definition Configuration: Type := Processors * States * AllSequenceNumbers * Messages * AuxiliaryData.
-Implicit Types (C: Configuration).
+Definition Configuration: Type := Processors * States * AllSequenceNumbers * Messages * SAuxiliaryData.
+Implicit Types (c: Configuration).
 
 (* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *)
 (* Action Application *)
 
-Definition replaceNp Np s n := fun s' => if string_dec s s' then n else Np s'.
+Definition mapOption {A B} (f: A -> B) (o: option A): option B :=
+match o with
+| Some a => Some (f a)
+| None => None
+end.
+Definition getNp Np s := mapOption snd (List.find (fun np => String.eqb s (fst np)) Np).
+Fixpoint replaceNp Np s n := match Np with
+| [] => [(s, n)]
+| np :: Np' => if String.eqb s (fst np) then (s, n) :: Np' else np :: replaceNp Np' s n
+end.
 Inductive applyActions: Actions -> SequenceNumbers -> Messages -> SequenceNumbers -> Messages -> Prop :=
-| apply_produce : forall s d Np M Np' M',
-  applyActions [`+ s d] Np M (replaceNp Np s (Np s + 1)) (message (Np s) s d :: M')
-| apply_consume : forall s d Np M Np' M',
-  List.In (message (Np s) s d) M ->
-  applyActions [`- s d] Np M (replaceNp Np s (Np s + 1)) M
+| apply_produce : forall s d Np M Np' M' nps,
+  Some nps = getNp Np s ->
+  applyActions [`+ s d] Np M (replaceNp Np s (nps + 1)) ((nps, s, d) :: M')
+| apply_consume : forall s d Np M Np' M' nps,
+  Some nps = getNp Np s ->
+  List.In (nps, s, d) M ->
+  applyActions [`- s d] Np M (replaceNp Np s (nps + 1)) M
 | apply_more : forall x X Np M Np' M' Np'' M'',
   applyActions [x] Np M Np' M' ->
   applyActions X Np' M' Np'' M'' ->
@@ -94,29 +100,39 @@ Inductive applyActions: Actions -> SequenceNumbers -> Messages -> SequenceNumber
 (* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *)
 (* Semantics *)
 
-Reserved Notation "C '=(' Np , X ')(' p ')=>s(' localRules ')' C'" (at level 60).
-Inductive StreamingStep (localRules: Processor -> State -> list Action -> State -> Prop):
-  Configuration -> SequenceNumbers -> Actions -> Fin.t countOfProcessors -> Configuration -> Prop :=
+Reserved Notation "c '=(' Np , X ')(' p ')=>s(' localRules ')' c'" (at level 60).
+Inductive StreamingStep (localRules: SProcessor -> SState -> list Action -> SState -> Prop):
+  Configuration -> SequenceNumbers -> Actions -> Fin.t SCountOfProcessors -> Configuration -> Prop :=
 | s_step: forall Pi Sigma N M D p X Sigmap' Np' M',
   localRules (nth Pi p) (nth Sigma p) (X) (Sigmap') ->
   applyActions X (nth N p) M Np' M' ->
   (Pi, Sigma, N, M, D) =(nth N p, X)(p)=>s(localRules) (Pi, replace Sigma p Sigmap', replace N p Np', M', D)
-where "C '=(' Np , X ')(' p ')=>s(' localRules ')' C'" := (StreamingStep localRules C Np X p C').
+where "c '=(' Np , X ')(' p ')=>s(' localRules ')' c'" := (StreamingStep localRules c Np X p c').
 
-Reserved Notation "C '=(' p ')=>s(' localRules ')' C'" (at level 60).
-Inductive StreamingAbsX (localRules: Processor -> State -> list Action -> State -> Prop):
-  Configuration -> Fin.t countOfProcessors -> Configuration -> Prop :=
+Reserved Notation "c '=(' p ')=>s(' localRules ')' c'" (at level 60).
+Inductive StreamingAbsX (localRules: SProcessor -> SState -> list Action -> SState -> Prop):
+  Configuration -> Fin.t SCountOfProcessors -> Configuration -> Prop :=
 | s_absx: forall Pi Sigma N M D Pi' Sigma' N' M' D' Np X p,
   (Pi, Sigma, N, M, D) =(Np, X)(p)=>s(localRules) (Pi', Sigma', N', M', D') ->
   (Pi, Sigma, N, M, D)        =(p)=>s(localRules) (Pi', Sigma', N', M', D')
-where "C '=(' p ')=>s(' localRules ')' C'" := (StreamingAbsX localRules C p C').
+where "c '=(' p ')=>s(' localRules ')' c'" := (StreamingAbsX localRules c p c').
 
-Reserved Notation "C '=>s(' localRules ')' C'" (at level 60).
-Inductive StreamingAbsP (localRules: Processor -> State -> list Action -> State -> Prop):
+Reserved Notation "c '=>s(' localRules ')' c'" (at level 60).
+Inductive StreamingAbsP (localRules: SProcessor -> SState -> list Action -> SState -> Prop):
   Configuration -> Configuration -> Prop :=
 | s_absp: forall Pi Sigma N M D Pi' Sigma' N' M' D' p,
   (Pi, Sigma, N, M, D) =(p)=>s(localRules) (Pi', Sigma', N', M', D') ->
   (Pi, Sigma, N, M, D)     =>s(localRules) (Pi', Sigma', N', M', D')
-where "C '=>s(' localRules ')' C'" := (StreamingAbsP localRules C C').
+where "c '=>s(' localRules ')' c'" := (StreamingAbsP localRules c c').
 
 End Streaming.
+
+Module StreamingNotations.
+
+Notation "`+" := produce (at level 1).
+Notation "`-" := consume (at level 1).
+Notation "c '=(' Np , X ')(' p ')=>s(' localRules ')' c'" := (StreamingStep localRules c Np X p c') (at level 60).
+Notation "c '=(' p ')=>s(' localRules ')' c'" := (StreamingAbsX localRules c p c') (at level 60).
+Notation "c '=>s(' localRules ')' c'" := (StreamingAbsP localRules c c') (at level 60).
+
+End StreamingNotations.
